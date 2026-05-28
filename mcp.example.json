@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "travel-advisor": {
+      "command": "travel-advisor-mcp",
+      "args": [],
+      "env": {
+        "RAPIDAPI_KEY": "your_rapidapi_key_here"
+      }
+    }
+  }
+}
