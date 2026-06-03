@@ -71,7 +71,6 @@ def register_all_tools() -> None:
     add_tool_handler(GetTravelItineraryToolHandler())
 
     logger.info("Total tools registered: %d", len(_tool_handlers))
-    logger.info("Tools available: %s", list(_tool_handlers.keys()))
 
 
 @app.list_tools()
@@ -105,53 +104,63 @@ async def call_tool(
         logger.info("Tool '%s' completed successfully", name)
         return result
     except Exception as exc:
-        logger.error("Tool '%s' failed: %s", name, exc, exc_info=True)
-        raise
+        logger.exception("Tool '%s' raised an exception: %s", name, exc)
+        return [
+            TextContent(
+                type="text",
+                text=f"Error executing tool '{name}': {exc}\n\n{traceback.format_exc()}",
+            )
+        ]
 
 
-def create_sse_starlette_app() -> Starlette:
+def create_sse_starlette_app(mcp_server: Server) -> Starlette:
     """Create Starlette app for SSE transport."""
-    sse = SseServerTransport("/messages/")
+    sse_transport = SseServerTransport("/messages/")
 
-    async def _handle_sse(request):
-        async with sse.connect_sse(request.scope, request.receive, request._send) as streams:
-            await app.run(streams[0], streams[1], app.create_initialization_options())
+    class _SSEEndpoint:
+        async def __call__(self, scope, receive, send) -> None:
+            async with sse_transport.connect_sse(scope, receive, send) as (
+                read_stream,
+                write_stream,
+            ):
+                await mcp_server.run(
+                    read_stream,
+                    write_stream,
+                    mcp_server.create_initialization_options(),
+                )
 
-    async def _handle_messages(request):
-        await sse.handle_post_message(request.scope, request.receive, request._send)
-
-    async def _health_endpoint(_request):
+    async def _health_endpoint(_request) -> JSONResponse:
         return JSONResponse({"status": "ok"})
 
-    async def _root_endpoint(_request):
+    async def _root_endpoint(_request) -> JSONResponse:
         return JSONResponse({"status": "ok", "transport": "sse"})
 
     starlette_app = Starlette(
         debug=False,
         routes=[
-            Route("/", _root_endpoint, methods=["GET"]),
-            Route("/health", _health_endpoint, methods=["GET"]),
-            Route("/sse", _handle_sse, methods=["GET"]),
-            Route("/messages/", _handle_messages, methods=["POST"]),
+            Route("/", endpoint=_root_endpoint),
+            Route("/health", endpoint=_health_endpoint),
+            Route("/healthz", endpoint=_health_endpoint),
+            Route("/sse", endpoint=_SSEEndpoint()),
+            Mount("/messages/", app=sse_transport.handle_post_message),
         ],
     )
 
     starlette_app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],
-        allow_credentials=True,
-        allow_methods=["*"],
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "OPTIONS"],
         allow_headers=["*"],
+        expose_headers=["*"],
+        max_age=86400,
     )
-
     return starlette_app
 
 
-def create_streamable_http_app() -> Starlette:
+def create_streamable_http_app(mcp_server: Server) -> Starlette:
     """Create Starlette app for Streamable HTTP transport."""
-    mcp_server = app
     session_manager = StreamableHTTPSessionManager(
-        server=mcp_server,
         app=mcp_server,
         event_store=None,
         json_response=False,
@@ -176,9 +185,10 @@ def create_streamable_http_app() -> Starlette:
     starlette_app = Starlette(
         debug=False,
         routes=[
-            Route("/", _root_endpoint, methods=["GET"]),
-            Route("/health", _health_endpoint, methods=["GET"]),
-            Mount("/mcp", app=_StreamableHTTPRoute()),
+            Route("/", endpoint=_root_endpoint),
+            Route("/health", endpoint=_health_endpoint),
+            Route("/healthz", endpoint=_health_endpoint),
+            Route("/mcp", endpoint=_StreamableHTTPRoute()),
         ],
         lifespan=_lifespan,
     )
@@ -186,84 +196,85 @@ def create_streamable_http_app() -> Starlette:
     starlette_app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],
-        allow_credentials=True,
-        allow_methods=["*"],
+        allow_credentials=False,
+        allow_methods=["GET", "POST", "OPTIONS"],
         allow_headers=["*"],
+        expose_headers=["mcp-session-id", "mcp-protocol-version"],
+        max_age=86400,
     )
-
     return starlette_app
 
 
-async def run_server(mode: str = "stdio", host: str = "0.0.0.0", port: int = 8011) -> None:
+async def run_server(mode: str, host: str = "0.0.0.0", port: int = 8000) -> None:
     """Run the server in the specified mode."""
-    logger.info("Travel Advisor MCP Server starting up")
-    logger.info("Python %s", sys.version)
-
-    register_all_tools()
-
     if mode == "stdio":
-        logger.info("Starting in stdio mode")
+        logger.info("Starting in STDIO mode")
         from mcp.server.stdio import stdio_server
 
-        async with stdio_server() as streams:
-            await app.run(streams[0], streams[1], app.create_initialization_options())
+        async with stdio_server() as (read_stream, write_stream):
+            await app.run(
+                read_stream,
+                write_stream,
+                app.create_initialization_options(),
+            )
 
     elif mode == "sse":
         logger.info("Starting in SSE mode on http://%s:%d", host, port)
-        config = uvicorn.Config(
-            create_sse_starlette_app(),
-            host=host,
-            port=port,
-            log_level="info",
-        )
+        starlette_app = create_sse_starlette_app(app)
+        config = uvicorn.Config(app=starlette_app, host=host, port=port, log_level="info")
         server = uvicorn.Server(config)
         await server.serve()
 
     elif mode == "streamable-http":
-        logger.info("Starting in Streamable HTTP mode on http://%s:%d", host, port)
-        config = uvicorn.Config(
-            create_streamable_http_app(),
-            host=host,
-            port=port,
-            log_level="info",
-        )
+        logger.info("Starting in STREAMABLE-HTTP mode on http://%s:%d", host, port)
+        starlette_app = create_streamable_http_app(app)
+        config = uvicorn.Config(app=starlette_app, host=host, port=port, log_level="info")
         server = uvicorn.Server(config)
         await server.serve()
 
     else:
-        logger.error("Unknown mode: %s", mode)
-        sys.exit(1)
+        raise ValueError(f"Unknown server mode: '{mode}'")
 
 
 async def main() -> None:
     """Main entry point."""
-    parser = argparse.ArgumentParser(description="Travel Advisor MCP Server")
+    def _normalize_mode(raw_mode: str) -> str:
+        return (raw_mode or "").strip().lower().replace("_", "-")
+
+    env_transport_mode = _normalize_mode(os.getenv("TRANSPORT_TYPE", ""))
+    if env_transport_mode not in {"stdio", "sse", "streamable-http"}:
+        env_transport_mode = ""
+
+    default_mode = env_transport_mode or ("streamable-http" if os.getenv("APP_PORT") else "stdio")
+
+    default_host = os.getenv("APP_HOST", "0.0.0.0")
+    try:
+        default_port = int(os.getenv("APP_PORT", os.getenv("PORT", "8000")))
+    except ValueError:
+        default_port = 8000
+
+    parser = argparse.ArgumentParser(
+        prog="travel-advisor-mcp",
+        description="Travel Advisor MCP Server",
+    )
     parser.add_argument(
         "--mode",
-        choices=["stdio", "sse", "streamable-http"],
-        default="stdio",
-        help="Server transport mode (default: stdio)",
+        choices=["stdio", "sse", "streamable-http", "streamable_http"],
+        default=default_mode,
+        help="Transport mode",
     )
-    parser.add_argument(
-        "--host",
-        default="0.0.0.0",
-        help="Host to bind to (default: 0.0.0.0)",
-    )
-    parser.add_argument(
-        "--port",
-        type=int,
-        default=8011,
-        help="Port to bind to (default: 8011)",
-    )
+    parser.add_argument("--host", default=default_host, help="Bind host for HTTP modes")
+    parser.add_argument("--port", type=int, default=default_port, help="Bind port for HTTP modes")
     args = parser.parse_args()
 
-    try:
-        await run_server(mode=args.mode, host=args.host, port=args.port)
-    except KeyboardInterrupt:
-        logger.info("Server stopped by user")
-    except Exception as exc:
-        logger.error("Server crashed: %s", exc, exc_info=True)
-        sys.exit(1)
+    logger.info("Travel Advisor MCP Server starting up")
+    logger.info("Python %s", sys.version)
+
+    register_all_tools()
+    logger.info("Tools available: %s", list(_tool_handlers.keys()))
+
+    mode = "streamable-http" if args.mode == "streamable_http" else args.mode
+    await run_server(mode=mode, host=args.host, port=args.port)
 
 
 def cli_main() -> None:

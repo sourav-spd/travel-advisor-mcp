@@ -31,7 +31,9 @@ pip install -e .
 
 ## API Key Setup
 
-This server uses simulated data and doesn't require an external API in demo mode. For production use with real travel APIs (like RapidAPI Travel Advisor), set up authentication:
+**Demo Mode (Default):** The server works immediately with simulated data - no API key required! Perfect for testing and development.
+
+**Production Mode (Optional):** For real travel APIs (like RapidAPI Travel Advisor), set up authentication:
 
 **Option 1: Use environment variable**
 ```bash
@@ -43,7 +45,7 @@ export RAPIDAPI_KEY="your_api_key_here"
 ```
 
 **Option 2: Use the travel_connect tool**
-Call the `travel_connect` tool with your API key.
+Call the `travel_connect` tool with your API key after starting the server.
 
 ## Usage
 
@@ -54,13 +56,21 @@ travel-advisor-mcp
 
 ### SSE Mode (for Web Clients)
 ```bash
-travel-advisor-mcp --mode sse --port 8011
+travel-advisor-mcp --mode sse --port 8000
 ```
 
 ### Streamable HTTP Mode (MCP v1)
 ```bash
-travel-advisor-mcp --mode streamable-http --port 8011
+travel-advisor-mcp --mode streamable-http --port 8000
 ```
+
+### Environment Variables
+
+- `MCP_MODE`: Transport mode (`sse`, `streamable-http`, `stdio`) - default: `sse`
+- `MCP_HOST`: Host to bind to - default: `0.0.0.0`
+- `MCP_PORT`: Port to bind to - default: `8000`
+- `RAPIDAPI_KEY`: Optional API key for production use
+
 
 ## Tools
 
@@ -184,7 +194,7 @@ Add to `claude_desktop_config.json`:
 {
   "mcpServers": {
     "travel-advisor": {
-      "url": "http://localhost:8011/sse"
+      "url": "http://localhost:8000/sse"
     }
   }
 }
@@ -219,15 +229,19 @@ travel-advisor-mcp/
 
 ## Data Mode
 
-**Current Mode:** Demo/Simulated Data
-- The server currently uses simulated travel data for demonstration
-- No external API calls required
-- Perfect for testing and development
+**Current Mode:** Demo Mode with API Integration Support
 
-**Production Mode:** Real API Integration
-- Can be extended to use real travel APIs (RapidAPI, Amadeus, etc.)
-- Requires API key and subscription
-- Simply update the tool implementations to make real API calls
+### Demo Mode (Default)
+- Works immediately with comprehensive simulated data
+- No external API calls or subscription required
+- Perfect for testing, development, and learning MCP
+- Includes realistic data for major destinations (Paris, Tokyo, New York, London, Rome, Dubai, Barcelona, Kolkata)
+
+### API Integration (Optional)
+- Can connect to RapidAPI Travel Advisor for real-time data
+- Supports automatic retry logic and error handling
+- Falls back to demo data if API is unavailable
+- Session-based connection (not persisted)
 
 ## Use Cases
 
