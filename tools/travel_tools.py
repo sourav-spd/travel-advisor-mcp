@@ -57,6 +57,78 @@ def _is_demo_mode() -> bool:
     return api_key == "demo" or not api_key
 
 
+def _parse_int_arg(
+    value: Any,
+    *,
+    field_name: str,
+    default: int,
+    minimum: int,
+    maximum: int,
+) -> tuple[int | None, str | None]:
+    """Parse integer args that may arrive as strings from MCP clients."""
+    if value is None:
+        return default, None
+
+    parsed = value
+    if isinstance(value, str):
+        try:
+            parsed = int(value)
+        except ValueError:
+            return None, f"Error: {field_name} must be a valid integer"
+
+    if not isinstance(parsed, int):
+        return None, f"Error: {field_name} must be an integer"
+
+    if parsed < minimum or parsed > maximum:
+        return None, f"Error: {field_name} must be between {minimum} and {maximum}"
+
+    return parsed, None
+
+
+def _parse_interests_arg(value: Any) -> tuple[List[str], str | None]:
+    """Parse interests from array, JSON string, or comma-separated string."""
+    default_interests = ["culture", "food"]
+    allowed = {
+        "culture",
+        "history",
+        "nature",
+        "food",
+        "adventure",
+        "relaxation",
+        "nightlife",
+        "shopping",
+    }
+
+    if value is None:
+        return default_interests, None
+
+    interests = value
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return default_interests, None
+        if stripped.startswith("["):
+            try:
+                interests = json.loads(stripped)
+            except json.JSONDecodeError:
+                return None, "Error: interests must be a valid JSON array or comma-separated list"
+        else:
+            interests = [item.strip() for item in stripped.split(",") if item.strip()]
+
+    if not isinstance(interests, list) or not all(isinstance(item, str) for item in interests):
+        return None, "Error: interests must be an array of strings"
+
+    normalized = [item.strip().lower() for item in interests if item.strip()]
+    if not normalized:
+        return default_interests, None
+
+    invalid = [item for item in normalized if item not in allowed]
+    if invalid:
+        return None, f"Error: invalid interests: {', '.join(invalid)}"
+
+    return normalized, None
+
+
 async def _make_api_request(
     endpoint: str,
     params: Dict[str, Any],
@@ -127,7 +199,9 @@ class TravelConnectToolHandler(ToolHandler):
             name=self.name,
             description="Connect to the Travel Advisor API by providing a RapidAPI key. Validates the key and enables real-time travel data.",
             inputSchema={
+                "$schema": "http://json-schema.org/draft-07/schema#",
                 "type": "object",
+                "additionalProperties": False,
                 "properties": {
                     "api_key": {
                         "type": "string",
@@ -213,14 +287,16 @@ class SearchDestinationsToolHandler(ToolHandler):
             name=self.name,
             description="Search for travel destinations by name or query. Returns real-time destination data when API key is connected, or comprehensive demo data otherwise.",
             inputSchema={
+                "$schema": "http://json-schema.org/draft-07/schema#",
                 "type": "object",
+                "additionalProperties": False,
                 "properties": {
                     "query": {
                         "type": "string",
                         "description": "Search query (city, country, or region name)",
                     },
                     "limit": {
-                        "type": "integer",
+                        "type": ["integer", "string"],
                         "description": "Maximum number of results to return (1-30)",
                         "default": 10,
                         "minimum": 1,
@@ -235,7 +311,15 @@ class SearchDestinationsToolHandler(ToolHandler):
         if "query" not in args:
             return [TextContent(type="text", text="Error: query is required")]
         query = args["query"]
-        limit = args.get("limit", 10)
+        limit, limit_err = _parse_int_arg(
+            args.get("limit", 10),
+            field_name="limit",
+            default=10,
+            minimum=1,
+            maximum=30,
+        )
+        if limit_err:
+            return [TextContent(type="text", text=limit_err)]
         api_key = _get_api_key()
         
         # Try real API if key is available
@@ -465,7 +549,9 @@ class GetDestinationDetailsToolHandler(ToolHandler):
             name=self.name,
             description="Get comprehensive details about a specific destination including attractions, climate, best times to visit, and travel tips.",
             inputSchema={
+                "$schema": "http://json-schema.org/draft-07/schema#",
                 "type": "object",
+                "additionalProperties": False,
                 "properties": {
                     "destination": {
                         "type": "string",
@@ -649,7 +735,9 @@ class FindAttractionsToolHandler(ToolHandler):
             name=self.name,
             description="Find tourist attractions and points of interest in a destination. Returns live data when API key is connected.",
             inputSchema={
+                "$schema": "http://json-schema.org/draft-07/schema#",
                 "type": "object",
+                "additionalProperties": False,
                 "properties": {
                     "destination": {
                         "type": "string",
@@ -662,7 +750,7 @@ class FindAttractionsToolHandler(ToolHandler):
                         "default": "all",
                     },
                     "limit": {
-                        "type": "integer",
+                        "type": ["integer", "string"],
                         "description": "Maximum results (1-20)",
                         "default": 10,
                         "minimum": 1,
@@ -678,7 +766,15 @@ class FindAttractionsToolHandler(ToolHandler):
             return [TextContent(type="text", text="Error: destination is required")]
         destination = args["destination"]
         category = args.get("category", "all")
-        limit = args.get("limit", 10)
+        limit, limit_err = _parse_int_arg(
+            args.get("limit", 10),
+            field_name="limit",
+            default=10,
+            minimum=1,
+            maximum=20,
+        )
+        if limit_err:
+            return [TextContent(type="text", text=limit_err)]
         api_key = _get_api_key()
         
         # Try real API if available
@@ -903,19 +999,21 @@ class SearchHotelsToolHandler(ToolHandler):
             name=self.name,
             description="Search for hotels and accommodations. Returns live availability and pricing when API key is connected.",
             inputSchema={
+                "$schema": "http://json-schema.org/draft-07/schema#",
                 "type": "object",
+                "additionalProperties": False,
                 "properties": {
                     "destination": {"type": "string", "description": "Destination name"},
                     "check_in": {"type": "string", "description": "Check-in date (YYYY-MM-DD)", "default": ""},
                     "check_out": {"type": "string", "description": "Check-out date (YYYY-MM-DD)", "default": ""},
-                    "guests": {"type": "integer", "description": "Number of guests", "default": 2, "minimum": 1, "maximum": 10},
+                    "guests": {"type": ["integer", "string"], "description": "Number of guests", "default": 2, "minimum": 1, "maximum": 10},
                     "price_range": {
                         "type": "string",
                         "enum": ["budget", "moderate", "upscale", "luxury", "all"],
                         "description": "Price category",
                         "default": "all"
                     },
-                    "limit": {"type": "integer", "description": "Max results (1-20)", "default": 10, "minimum": 1, "maximum": 20},
+                    "limit": {"type": ["integer", "string"], "description": "Max results (1-20)", "default": 10, "minimum": 1, "maximum": 20},
                 },
                 "required": ["destination"],
             },
@@ -927,9 +1025,25 @@ class SearchHotelsToolHandler(ToolHandler):
         destination = args["destination"]
         check_in = args.get("check_in", "")
         check_out = args.get("check_out", "")
-        guests = args.get("guests", 2)
+        guests, guests_err = _parse_int_arg(
+            args.get("guests", 2),
+            field_name="guests",
+            default=2,
+            minimum=1,
+            maximum=10,
+        )
+        if guests_err:
+            return [TextContent(type="text", text=guests_err)]
         price_range = args.get("price_range", "all")
-        limit = args.get("limit", 10)
+        limit, limit_err = _parse_int_arg(
+            args.get("limit", 10),
+            field_name="limit",
+            default=10,
+            minimum=1,
+            maximum=20,
+        )
+        if limit_err:
+            return [TextContent(type="text", text=limit_err)]
         api_key = _get_api_key()
         
         # Try real API if available
@@ -1126,7 +1240,9 @@ class GetTravelTipsToolHandler(ToolHandler):
             name=self.name,
             description="Get practical travel tips and insider advice for a destination.",
             inputSchema={
+                "$schema": "http://json-schema.org/draft-07/schema#",
                 "type": "object",
+                "additionalProperties": False,
                 "properties": {
                     "destination": {"type": "string", "description": "Destination name"},
                     "category": {
@@ -1406,18 +1522,20 @@ class GetTravelItineraryToolHandler(ToolHandler):
             name=self.name,
             description="Generate a customized travel itinerary based on duration, interests and pace preferences.",
             inputSchema={
+                "$schema": "http://json-schema.org/draft-07/schema#",
                 "type": "object",
+                "additionalProperties": False,
                 "properties": {
                     "destination": {"type": "string", "description": "Destination name"},
                     "duration_days": {
-                        "type": "integer",
+                        "type": ["integer", "string"],
                         "description": "Trip duration in days (1-14)",
                         "default": 3,
                         "minimum": 1,
                         "maximum": 14
                     },
                     "interests": {
-                        "type": "array",
+                        "type": ["array", "string"],
                         "items": {
                             "type": "string",
                             "enum": ["culture", "history", "nature", "food", "adventure", "relaxation", "nightlife", "shopping"]
@@ -1440,8 +1558,20 @@ class GetTravelItineraryToolHandler(ToolHandler):
         if "destination" not in args:
             return [TextContent(type="text", text="Error: destination is required")]
         destination = args["destination"]
-        duration_days = min(args.get("duration_days", 3), 14)
-        interests = args.get("interests", ["culture", "food"])
+        duration_days, duration_err = _parse_int_arg(
+            args.get("duration_days", 3),
+            field_name="duration_days",
+            default=3,
+            minimum=1,
+            maximum=14,
+        )
+        if duration_err:
+            return [TextContent(type="text", text=duration_err)]
+
+        interests, interests_err = _parse_interests_arg(args.get("interests", ["culture", "food"]))
+        if interests_err:
+            return [TextContent(type="text", text=interests_err)]
+
         pace = args.get("pace", "moderate")
         
         logger.info(f"📅 Generating {duration_days}-day itinerary for {destination}")

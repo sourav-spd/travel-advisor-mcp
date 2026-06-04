@@ -241,15 +241,18 @@ async def main() -> None:
     def _normalize_mode(raw_mode: str) -> str:
         return (raw_mode or "").strip().lower().replace("_", "-")
 
-    env_transport_mode = _normalize_mode(os.getenv("TRANSPORT_TYPE", ""))
+    env_transport_mode = _normalize_mode(
+        os.getenv("TRANSPORT_TYPE", "") or os.getenv("MCP_MODE", "")
+    )
     if env_transport_mode not in {"stdio", "sse", "streamable-http"}:
         env_transport_mode = ""
 
-    default_mode = env_transport_mode or ("streamable-http" if os.getenv("APP_PORT") else "stdio")
+    app_port = os.getenv("APP_PORT") or os.getenv("MCP_PORT") or os.getenv("PORT")
+    default_mode = env_transport_mode or ("streamable-http" if app_port else "stdio")
 
-    default_host = os.getenv("APP_HOST", "0.0.0.0")
+    default_host = os.getenv("APP_HOST") or os.getenv("MCP_HOST") or "0.0.0.0"
     try:
-        default_port = int(os.getenv("APP_PORT", os.getenv("PORT", "8000")))
+        default_port = int(app_port or "8000")
     except ValueError:
         default_port = 8000
 
