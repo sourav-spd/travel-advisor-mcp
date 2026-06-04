@@ -282,6 +282,121 @@ class SearchDestinationsToolHandler(ToolHandler):
     def __init__(self) -> None:
         super().__init__("search_destinations")
 
+    @staticmethod
+    def _safe_float(value: Any, default: float = 0.0) -> float:
+        try:
+            if value is None or value == "":
+                return default
+            return float(value)
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _safe_int(value: Any, default: int = 0) -> int:
+        try:
+            if value is None or value == "":
+                return default
+            return int(value)
+        except (TypeError, ValueError):
+            return default
+
+    @staticmethod
+    def _first_non_empty(*values: Any) -> str:
+        for value in values:
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return ""
+
+    @staticmethod
+    def _extract_ancestor_names(ancestors: Any) -> list[str]:
+        names: list[str] = []
+        if not isinstance(ancestors, list):
+            return names
+
+        for ancestor in ancestors:
+            if not isinstance(ancestor, dict):
+                continue
+
+            direct_name = ancestor.get("name") or ancestor.get("localized_name")
+            if isinstance(direct_name, str) and direct_name.strip():
+                names.append(direct_name.strip())
+
+            subcategories = ancestor.get("subcategory")
+            if isinstance(subcategories, list):
+                for subcat in subcategories:
+                    if not isinstance(subcat, dict):
+                        continue
+                    subcat_name = subcat.get("name") or subcat.get("localized_name")
+                    if isinstance(subcat_name, str) and subcat_name.strip():
+                        names.append(subcat_name.strip())
+
+        return names
+
+    def _normalize_destination(
+        self,
+        item: Dict[str, Any],
+        result_obj: Dict[str, Any],
+        details_obj: Dict[str, Any] | None = None,
+    ) -> Dict[str, Any]:
+        details_obj = details_obj or {}
+
+        address_obj = result_obj.get("address_obj", {}) if isinstance(result_obj.get("address_obj", {}), dict) else {}
+        details_address_obj = details_obj.get("address_obj", {}) if isinstance(details_obj.get("address_obj", {}), dict) else {}
+        ancestors = result_obj.get("ancestors", [])
+        ancestor_names = self._extract_ancestor_names(ancestors)
+
+        city = self._first_non_empty(
+            address_obj.get("city"),
+            details_address_obj.get("city"),
+            result_obj.get("city"),
+            details_obj.get("city"),
+            result_obj.get("name"),
+        )
+
+        state = self._first_non_empty(
+            address_obj.get("state"),
+            details_address_obj.get("state"),
+            result_obj.get("state"),
+            details_obj.get("state"),
+            ancestor_names[0] if len(ancestor_names) > 0 else "",
+        )
+
+        country = self._first_non_empty(
+            address_obj.get("country"),
+            details_address_obj.get("country"),
+            result_obj.get("country"),
+            details_obj.get("country"),
+            ancestor_names[1] if len(ancestor_names) > 1 else "",
+        )
+
+        return {
+            "location_id": result_obj.get("location_id") or details_obj.get("location_id"),
+            "name": self._first_non_empty(result_obj.get("name"), details_obj.get("name"), "Unknown"),
+            "country": country,
+            "city": city,
+            "state": state,
+            "address": self._first_non_empty(
+                address_obj.get("address_string"),
+                details_address_obj.get("address_string"),
+                result_obj.get("location_string"),
+                details_obj.get("location_string"),
+            ),
+            "type": item.get("result_type", "destination"),
+            "description": self._first_non_empty(
+                result_obj.get("description"),
+                details_obj.get("description"),
+                result_obj.get("geo_description"),
+                details_obj.get("geo_description"),
+                result_obj.get("name"),
+            ),
+            "rating": self._safe_float(result_obj.get("rating", details_obj.get("rating", 0))),
+            "num_reviews": self._safe_int(result_obj.get("num_reviews", details_obj.get("num_reviews", 0))),
+            "latitude": result_obj.get("latitude") or details_obj.get("latitude"),
+            "longitude": result_obj.get("longitude") or details_obj.get("longitude"),
+            "timezone": self._first_non_empty(result_obj.get("timezone"), details_obj.get("timezone")),
+            "website": result_obj.get("website") or details_obj.get("website"),
+        }
+
     def get_tool_description(self) -> Tool:
         return Tool(
             name=self.name,
@@ -336,24 +451,25 @@ class SearchDestinationsToolHandler(ToolHandler):
                     destinations = []
                     for item in api_response.get("data", [])[:limit]:
                         result_obj = item.get("result_object", {})
-                        address_obj = result_obj.get("address_obj", {})
-                        
-                        destination = {
-                            "location_id": result_obj.get("location_id"),
-                            "name": result_obj.get("name", "Unknown"),
-                            "country": address_obj.get("country", ""),
-                            "city": address_obj.get("city", ""),
-                            "state": address_obj.get("state", ""),
-                            "address": address_obj.get("address_string", ""),
-                            "type": item.get("result_type", "destination"),
-                            "description": result_obj.get("description", ""),
-                            "rating": float(result_obj.get("rating", 0)),
-                            "num_reviews": int(result_obj.get("num_reviews", 0)),
-                            "latitude": result_obj.get("latitude"),
-                            "longitude": result_obj.get("longitude"),
-                            "timezone": result_obj.get("timezone"),
-                            "website": result_obj.get("website"),
-                        }
+
+                        details_obj: Dict[str, Any] | None = None
+                        location_id = result_obj.get("location_id")
+                        is_geos = item.get("result_type") == "geos"
+                        has_sparse_fields = not result_obj.get("address_obj") or not result_obj.get("description")
+
+                        if location_id and (is_geos or has_sparse_fields):
+                            try:
+                                details_response = await _make_api_request(
+                                    "/location/details",
+                                    {"location_id": str(location_id), "lang": "en_US"},
+                                    api_key,
+                                )
+                                if isinstance(details_response, dict):
+                                    details_obj = details_response
+                            except Exception as details_exc:
+                                logger.debug("Details enrichment failed for location_id=%s: %s", location_id, details_exc)
+
+                        destination = self._normalize_destination(item, result_obj, details_obj)
                         destinations.append(destination)
                     
                     result = {
